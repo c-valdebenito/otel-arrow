@@ -4,4 +4,4 @@ note: "Azure Monitor exports now report shared per-attempt exporter metrics."
 issues: [3822]
 subtext: |
   Migration: Replace queries for exporter.azure_monitor.exports items, messages,
-  and bytes with exporter.attempted items, messages, payload.size, and duration.
+  and bytes with exporter.attempted items, messages, and payload.size.

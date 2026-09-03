@@ -236,7 +236,6 @@ impl AzureMonitorExporterMetricsTracker {
         items: u64,
         messages: u64,
         payload_size: u64,
-        duration: std::time::Duration,
     ) {
         let attributes = SignalOutcomeAttributes {
             signal: SignalType::Logs,
@@ -244,7 +243,6 @@ impl AzureMonitorExporterMetricsTracker {
         };
         let attempted = self.attempted_metrics.with(attributes);
         attempted.messages.add(messages);
-        attempted.duration.record(duration.as_secs_f64());
         self.attempted_items_metrics.with(attributes).record(items);
         self.attempted_payload_metrics
             .with(attributes)
@@ -325,28 +323,15 @@ mod tests {
     }
 
     /// Scenario: HTTP export attempts complete with successful and failed outcomes.
-    /// Guarantees: Shared message, item, payload-size, and duration metrics are partitioned by outcome.
+    /// Guarantees: Shared message, item, and payload-size counters are partitioned by outcome.
     #[test]
     fn attempted_metrics_are_partitioned_by_outcome() {
         let mut metrics = new_test_tracker();
-        metrics.record_attempt(
-            Outcome::Success,
-            100,
-            50,
-            1_024,
-            std::time::Duration::from_millis(20),
-        );
-        metrics.record_attempt(
-            Outcome::Failure,
-            10,
-            5,
-            512,
-            std::time::Duration::from_millis(30),
-        );
+        metrics.record_attempt(Outcome::Success, 100, 50, 1_024);
+        metrics.record_attempt(Outcome::Failure, 10, 5, 512);
 
         let success = metrics.attempted_for(Outcome::Success);
         assert_eq!(success.messages.get(), 50);
-        assert_eq!(success.duration.get().count(), 1);
         assert_eq!(
             metrics.attempted_items_for(Outcome::Success).items.get(),
             100
@@ -361,7 +346,6 @@ mod tests {
 
         let failure = metrics.attempted_for(Outcome::Failure);
         assert_eq!(failure.messages.get(), 5);
-        assert_eq!(failure.duration.get().count(), 1);
         assert_eq!(
             metrics.attempted_items_for(Outcome::Failure).items.get(),
             10
@@ -478,13 +462,7 @@ mod tests {
     #[test]
     fn terminal_snapshots_include_touched_measurement_metrics() {
         let mut metrics = new_test_tracker();
-        metrics.record_attempt(
-            Outcome::Success,
-            10,
-            1,
-            100,
-            std::time::Duration::from_millis(10),
-        );
+        metrics.record_attempt(Outcome::Success, 10, 1, 100);
 
         let snapshots = metrics.terminal_snapshots();
         let export_snapshot = snapshots
@@ -511,13 +489,7 @@ mod tests {
         let mut metrics = new_test_tracker();
         let (receiver, mut reporter) = MetricsReporter::create_new_and_receiver(16);
         metrics.add_batch_size(42.0);
-        metrics.record_attempt(
-            Outcome::Success,
-            42,
-            1,
-            420,
-            std::time::Duration::from_millis(10),
-        );
+        metrics.record_attempt(Outcome::Success, 42, 1, 420);
 
         metrics.report(&mut reporter).unwrap();
 

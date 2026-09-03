@@ -302,7 +302,6 @@ impl LogsIngestionClient {
                         metadata.items,
                         metadata.messages,
                         payload_size,
-                        elapsed,
                     );
                 }
                 return Err(Error::network(e));
@@ -322,7 +321,6 @@ impl LogsIngestionClient {
                 metadata.items,
                 metadata.messages,
                 payload_size,
-                elapsed,
             );
         }
 
