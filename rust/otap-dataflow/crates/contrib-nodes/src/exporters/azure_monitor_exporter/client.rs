@@ -3,7 +3,7 @@
 
 use bytes::Bytes;
 
-use otel_arrow_dfe_telemetry::common_attributes::HttpResponse;
+use otel_arrow_dfe_telemetry::common_attributes::{HttpResponse, Outcome};
 use rand::{RngExt, SeedableRng, rngs::SmallRng};
 use reqwest::{
     Client,
@@ -19,6 +19,13 @@ const MAX_RETRIES: u32 = 5;
 const INITIAL_BACKOFF: Duration = Duration::from_secs(3);
 const MAX_BACKOFF: Duration = Duration::from_secs(30);
 const MAX_IDLE_CONNECTIONS_PER_HOST: usize = 2;
+
+/// Counts naturally available for every HTTP attempt of one compressed batch.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ExportAttemptMetadata {
+    pub(super) messages: u64,
+    pub(super) items: u64,
+}
 
 /// HTTP header name for Azure Monitor source resource ID tracking.
 pub(super) const AZURE_MONITOR_SOURCE_RESOURCEID_HEADER: &str = "azure-monitor-source-resourceid";
@@ -190,6 +197,25 @@ impl LogsIngestionClient {
         body: Bytes,
         auth_header: &HeaderValue,
     ) -> Result<Duration, Error> {
+        self.export_inner(body, auth_header, None).await
+    }
+
+    /// Export compressed data and record the PData counts represented by each HTTP attempt.
+    pub(super) async fn export_with_metadata(
+        &mut self,
+        body: Bytes,
+        auth_header: &HeaderValue,
+        metadata: ExportAttemptMetadata,
+    ) -> Result<Duration, Error> {
+        self.export_inner(body, auth_header, Some(metadata)).await
+    }
+
+    async fn export_inner(
+        &mut self,
+        body: Bytes,
+        auth_header: &HeaderValue,
+        metadata: Option<ExportAttemptMetadata>,
+    ) -> Result<Duration, Error> {
         let mut attempt = 0u32;
         let mut rng = SmallRng::seed_from_u64(
             std::time::SystemTime::now()
@@ -200,7 +226,7 @@ impl LogsIngestionClient {
         );
 
         loop {
-            match self.try_export(body.clone(), auth_header).await {
+            match self.try_export(body.clone(), auth_header, metadata).await {
                 Ok(duration) => return Ok(duration),
                 Err(e) if !e.is_retryable() => {
                     return Err(Error::ExportFailed {
@@ -247,8 +273,10 @@ impl LogsIngestionClient {
         &mut self,
         body: Bytes,
         auth_header: &HeaderValue,
+        metadata: Option<ExportAttemptMetadata>,
     ) -> Result<Duration, Error> {
         let start = Instant::now();
+        let payload_size = body.len() as u64;
 
         let mut request = self
             .http_client
@@ -264,10 +292,19 @@ impl LogsIngestionClient {
         let response = match request.body(body).send().await {
             Ok(resp) => resp,
             Err(e) => {
-                self.metrics.borrow_mut().record_http_attempt(
-                    HttpResponse::NetworkError,
-                    start.elapsed().as_millis() as f64,
-                );
+                let elapsed = start.elapsed();
+                self.metrics
+                    .borrow_mut()
+                    .record_http_attempt(HttpResponse::NetworkError, elapsed.as_millis() as f64);
+                if let Some(metadata) = metadata {
+                    self.metrics.borrow_mut().record_attempt(
+                        Outcome::Failure,
+                        metadata.items,
+                        metadata.messages,
+                        payload_size,
+                        elapsed,
+                    );
+                }
                 return Err(Error::network(e));
             }
         };
@@ -279,6 +316,15 @@ impl LogsIngestionClient {
             http_response_for_status(status_code),
             elapsed.as_millis() as f64,
         );
+        if let Some(metadata) = metadata {
+            self.metrics.borrow_mut().record_attempt(
+                export_outcome_for_status(status_code),
+                metadata.items,
+                metadata.messages,
+                payload_size,
+                elapsed,
+            );
+        }
 
         if response.status().is_success() {
             return Ok(elapsed);
@@ -327,6 +373,14 @@ fn http_response_for_status(status: u16) -> HttpResponse {
         429 => HttpResponse::Http429,
         500..=599 => HttpResponse::Http5xx,
         _ => HttpResponse::Other,
+    }
+}
+
+fn export_outcome_for_status(status: u16) -> Outcome {
+    match status {
+        200..=299 => Outcome::Success,
+        400 | 401 | 403 | 404 | 413 | 429 => Outcome::Refused,
+        _ => Outcome::Failure,
     }
 }
 
@@ -381,6 +435,18 @@ mod tests {
         assert_eq!(http_response_for_status(400), HttpResponse::Http400);
         assert_eq!(http_response_for_status(404), HttpResponse::Http404);
         assert_eq!(http_response_for_status(418), HttpResponse::Other);
+    }
+
+    /// Scenario: HTTP export attempts receive successful, rejected, and failed responses.
+    /// Guarantees: Shared attempt outcomes distinguish explicit 4xx refusal from transport/backend failure.
+    #[test]
+    fn classifies_shared_export_attempt_outcomes() {
+        assert_eq!(export_outcome_for_status(204), Outcome::Success);
+        assert_eq!(export_outcome_for_status(400), Outcome::Refused);
+        assert_eq!(export_outcome_for_status(429), Outcome::Refused);
+        assert_eq!(export_outcome_for_status(408), Outcome::Failure);
+        assert_eq!(export_outcome_for_status(500), Outcome::Failure);
+        assert_eq!(export_outcome_for_status(302), Outcome::Failure);
     }
 
     // ==================== Construction Tests ====================

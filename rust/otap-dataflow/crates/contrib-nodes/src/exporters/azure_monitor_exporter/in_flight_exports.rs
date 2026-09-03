@@ -8,6 +8,7 @@ use futures::stream::FuturesUnordered;
 use http::HeaderValue;
 use tokio::time::Duration;
 
+use super::client::ExportAttemptMetadata;
 use super::client::LogsIngestionClient;
 use super::error::Error;
 
@@ -90,6 +91,7 @@ impl InFlightExports {
         client: LogsIngestionClient,
         batch_id: u64,
         row_count: u64,
+        message_count: u64,
         body: Bytes,
         auth_header: HeaderValue,
         token_generation: u64,
@@ -98,6 +100,7 @@ impl InFlightExports {
             client,
             batch_id,
             row_count,
+            message_count,
             body,
             auth_header,
             token_generation,
@@ -116,13 +119,23 @@ impl InFlightExports {
         mut client: LogsIngestionClient,
         batch_id: u64,
         row_count: u64,
+        message_count: u64,
         body: Bytes,
         auth_header: HeaderValue,
         token_generation: u64,
     ) -> LocalBoxFuture<'static, CompletedExport> {
         Box::pin(async move {
             let body_size_bytes = body.len() as u64;
-            let result = client.export(body, &auth_header).await;
+            let result = client
+                .export_with_metadata(
+                    body,
+                    &auth_header,
+                    ExportAttemptMetadata {
+                        messages: message_count,
+                        items: row_count,
+                    },
+                )
+                .await;
             CompletedExport {
                 batch_id,
                 client,
@@ -334,6 +347,7 @@ mod tests {
             client,
             1,
             10,
+            1,
             Bytes::from("data"),
             auth_header,
             token_generation,
@@ -353,6 +367,7 @@ mod tests {
             create_test_client(),
             1,
             100,
+            2,
             Bytes::from("data"),
             auth_header,
             token_generation,
@@ -364,6 +379,7 @@ mod tests {
             create_test_client(),
             2,
             50,
+            3,
             Bytes::from("data"),
             auth_header,
             token_generation,
@@ -390,6 +406,7 @@ mod tests {
             create_test_client(),
             2,
             25,
+            1,
             Bytes::from("data"),
             auth_header,
             token_generation,
@@ -424,6 +441,7 @@ mod tests {
             client,
             7,
             3,
+            1,
             Bytes::from_static(b"payload"),
             HeaderValue::from_static("Bearer gen-7"),
             42,

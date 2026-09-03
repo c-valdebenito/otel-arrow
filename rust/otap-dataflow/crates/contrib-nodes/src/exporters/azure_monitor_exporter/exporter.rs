@@ -182,19 +182,14 @@ impl AzureMonitorExporter {
         effect_handler: &EffectHandler<OtapPdata>,
         batch_id: u64,
         row_count: u64,
-        body_size_bytes: u64,
+        _body_size_bytes: u64,
         duration: std::time::Duration,
     ) -> Result<(), EngineError> {
         // Export succeeded - Ack only fully-completed messages
         let completed_messages = self.state.remove_batch_success(batch_id);
         {
             let mut m = self.metrics.borrow_mut();
-            m.record_export(
-                Outcome::Success,
-                row_count,
-                completed_messages.len() as u64,
-                body_size_bytes,
-            );
+            m.record_completed_batch(Outcome::Success);
         }
 
         otel_debug!(
@@ -216,20 +211,15 @@ impl AzureMonitorExporter {
         &mut self,
         effect_handler: &EffectHandler<OtapPdata>,
         batch_id: u64,
-        row_count: u64,
-        body_size_bytes: u64,
+        _row_count: u64,
+        _body_size_bytes: u64,
         error: Error,
     ) -> Result<(), EngineError> {
         // Export failed - Nack ALL messages in this batch, remove entirely
         let failed_messages = self.state.remove_batch_failure(batch_id);
         {
             let mut m = self.metrics.borrow_mut();
-            m.record_export(
-                Outcome::Failure,
-                row_count,
-                failed_messages.len() as u64,
-                body_size_bytes,
-            );
+            m.record_completed_batch(Outcome::Failure);
         }
 
         otel_warn!("azure_monitor_exporter.export.failed", batch_id = batch_id, error = %error);
@@ -286,10 +276,12 @@ impl AzureMonitorExporter {
         };
 
         let client = self.client_pool.take();
+        let message_count = self.state.batch_message_count(pending_batch.batch_id);
         self.in_flight_exports.push_export(
             client,
             pending_batch.batch_id,
             pending_batch.row_count,
+            message_count,
             pending_batch.compressed_data,
             auth_header,
             token_generation,
@@ -630,12 +622,14 @@ impl Exporter<OtapPdata> for AzureMonitorExporter {
                                 let bs = m.batch_size();
                                 otel_debug!(
                                     "azure_monitor_exporter.metrics.collect",
-                                    successful_items = m.export_for(Outcome::Success).items.get(),
                                     successful_batches = m.export_for(Outcome::Success).batches.get(),
-                                    successful_messages = m.export_for(Outcome::Success).messages.get(),
-                                    failed_items = m.export_for(Outcome::Failure).items.get(),
+                                    successful_attempted_items = m.attempted_items_for(Outcome::Success).items.get(),
+                                    successful_attempted_messages = m.attempted_for(Outcome::Success).messages.get(),
+                                    successful_attempted_payload_bytes = m.attempted_payload_for(Outcome::Success).payload_size.get(),
                                     failed_batches = m.export_for(Outcome::Failure).batches.get(),
-                                    failed_messages = m.export_for(Outcome::Failure).messages.get(),
+                                    failed_attempted_items = m.attempted_items_for(Outcome::Failure).items.get(),
+                                    failed_attempted_messages = m.attempted_for(Outcome::Failure).messages.get(),
+                                    failed_attempted_payload_bytes = m.attempted_payload_for(Outcome::Failure).payload_size.get(),
                                     client_success_latency_avg_ms = if cl.count > 0 { cl.sum / cl.count as f64 } else { 0.0 },
                                     client_success_latency_min_ms = if cl.count > 0 { cl.min } else { 0.0 },
                                     client_success_latency_max_ms = if cl.count > 0 { cl.max } else { 0.0 },
@@ -819,8 +813,8 @@ mod tests {
         auth
     }
 
-    /// Scenario: A completed export succeeds with a known compressed request-body size.
-    /// Guarantees: The successful outcome records the resolved request-body bytes.
+    /// Scenario: A completed HTTP batch succeeds.
+    /// Guarantees: The Azure-specific completed-batch diagnostic records success.
     #[tokio::test]
     async fn test_handle_export_success() {
         let config = create_test_config();
@@ -854,9 +848,6 @@ mod tests {
         let m = exporter.metrics.borrow();
         let success = m.export_for(Outcome::Success);
         assert_eq!(success.batches.get(), 1);
-        assert_eq!(success.messages.get(), 1);
-        assert_eq!(success.items.get(), 10);
-        assert_eq!(success.bytes.get(), 1_024);
         drop(m);
 
         // Verify state cleared
@@ -864,8 +855,8 @@ mod tests {
         assert!(exporter.state.msg_to_data.is_empty());
     }
 
-    /// Scenario: A completed export fails with a known compressed request-body size.
-    /// Guarantees: The failed outcome records the resolved request-body bytes.
+    /// Scenario: A completed HTTP batch fails.
+    /// Guarantees: The Azure-specific completed-batch diagnostic records failure.
     #[tokio::test]
     async fn test_handle_export_failure() {
         let config = create_test_config();
@@ -904,9 +895,6 @@ mod tests {
         let m = exporter.metrics.borrow();
         let failure = m.export_for(Outcome::Failure);
         assert_eq!(failure.batches.get(), 1);
-        assert_eq!(failure.messages.get(), 1);
-        assert_eq!(failure.items.get(), 10);
-        assert_eq!(failure.bytes.get(), 512);
         drop(m);
 
         // Verify state cleared

@@ -45,7 +45,7 @@ pub use heartbeat::Heartbeat;
 pub use metrics::{
     AzureMonitorExporterExportMetrics, AzureMonitorExporterHeartbeatMetrics,
     AzureMonitorExporterHttpMetrics, AzureMonitorExporterMetricsRc,
-    AzureMonitorExporterOperationalMetrics, ExportSignalAttributes,
+    AzureMonitorExporterOperationalMetrics,
 };
 pub use transformer::Transformer;
 

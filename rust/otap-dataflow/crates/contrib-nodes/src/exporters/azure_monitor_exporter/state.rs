@@ -11,6 +11,9 @@ pub struct AzureMonitorExporterState {
     /// batch_id -> set of msg_ids
     pub batch_to_msg: HashMap<u64, HashSet<u64>>,
 
+    /// Immutable number of unique messages whose rows were encoded into each batch.
+    batch_message_counts: HashMap<u64, u64>,
+
     /// msg_id -> set of batch_ids
     pub msg_to_batch: HashMap<u64, HashSet<u64>>,
 
@@ -23,6 +26,7 @@ impl AzureMonitorExporterState {
     pub fn new() -> Self {
         Self {
             batch_to_msg: HashMap::with_capacity(256),
+            batch_message_counts: HashMap::with_capacity(256),
             msg_to_batch: HashMap::with_capacity(256),
             msg_to_data: HashMap::with_capacity(256),
         }
@@ -33,11 +37,14 @@ impl AzureMonitorExporterState {
     #[inline]
     pub fn add_batch_msg_relationship(&mut self, batch_id: u64, msg_id: u64) {
         // Batch -> Msg
-        _ = self
+        let inserted = self
             .batch_to_msg
             .entry(batch_id)
             .or_default()
             .insert(msg_id);
+        if inserted {
+            *self.batch_message_counts.entry(batch_id).or_default() += 1;
+        }
 
         // Msg -> Batch
         _ = self
@@ -66,6 +73,16 @@ impl AzureMonitorExporterState {
             .or_insert((context, otap_payload));
     }
 
+    /// Return the number of unique PData messages represented by a batch.
+    #[inline]
+    #[must_use]
+    pub fn batch_message_count(&self, batch_id: u64) -> u64 {
+        self.batch_message_counts
+            .get(&batch_id)
+            .copied()
+            .unwrap_or(0)
+    }
+
     #[inline]
     pub fn remove_msg_to_data(&mut self, msg_id: u64) -> Option<(Context, OtapPayload)> {
         self.msg_to_data.remove(&msg_id)
@@ -74,6 +91,7 @@ impl AzureMonitorExporterState {
     /// Remove a batch on SUCCESS - only returns messages with no remaining batches.
     pub fn remove_batch_success(&mut self, batch_id: u64) -> Vec<(u64, Context, OtapPayload)> {
         let mut orphaned = Vec::new();
+        _ = self.batch_message_counts.remove(&batch_id);
 
         if let Some(msgs) = self.batch_to_msg.remove(&batch_id) {
             for msg_id in msgs {
@@ -98,6 +116,7 @@ impl AzureMonitorExporterState {
     /// Messages are removed from all their batch associations.
     pub fn remove_batch_failure(&mut self, batch_id: u64) -> Vec<(u64, Context, OtapPayload)> {
         let mut failed = Vec::new();
+        _ = self.batch_message_counts.remove(&batch_id);
 
         if let Some(msgs) = self.batch_to_msg.remove(&batch_id) {
             for msg_id in msgs {
@@ -129,6 +148,7 @@ impl AzureMonitorExporterState {
     pub fn drain_all(&mut self) -> Vec<(u64, Context, OtapPayload)> {
         // Clear batch relationships
         self.batch_to_msg.clear();
+        self.batch_message_counts.clear();
         self.msg_to_batch.clear();
 
         // Drain and return all message data
@@ -165,6 +185,8 @@ mod tests {
         assert!(state.msg_to_data.is_empty());
     }
 
+    /// Scenario: A message is associated with one compressed batch and retained for Ack/Nack.
+    /// Guarantees: Both lifecycle state and immutable attempt message accounting are populated.
     #[test]
     fn test_add_relationships_and_data() {
         let mut state = AzureMonitorExporterState::new();
@@ -182,6 +204,7 @@ mod tests {
         assert!(state.msg_to_batch.get(&msg_id).unwrap().contains(&batch_id));
 
         assert!(state.msg_to_data.contains_key(&msg_id));
+        assert_eq!(state.batch_message_count(batch_id), 1);
     }
 
     #[test]
@@ -273,6 +296,8 @@ mod tests {
         assert!(!state.msg_to_data.contains_key(&msg2));
     }
 
+    /// Scenario: One message spans two batches and the first batch fails.
+    /// Guarantees: Ack/Nack associations are removed while the second batch retains its encoded message count.
     #[test]
     fn test_remove_batch_failure() {
         let mut state = AzureMonitorExporterState::new();
@@ -308,6 +333,11 @@ mod tests {
         if let Some(batch2_msgs) = state.batch_to_msg.get(&batch2) {
             assert!(!batch2_msgs.contains(&msg2));
         }
+        assert_eq!(
+            state.batch_message_count(batch2),
+            1,
+            "attempt accounting must retain the encoded message count"
+        );
     }
 
     #[test]

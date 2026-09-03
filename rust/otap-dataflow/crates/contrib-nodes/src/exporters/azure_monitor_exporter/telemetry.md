@@ -8,10 +8,11 @@ by the crate and log events emitted via `otel_*` log macros.
 
 | Metric name | Description | Produced in file |
 | --- | --- | --- |
-| `exporter.azure_monitor.exports.items` | Number of log items (Azure Monitor rows) in completed export attempts. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/exporter.rs` |
-| `exporter.azure_monitor.exports.batches` | Number of completed log export batches. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/exporter.rs` |
-| `exporter.azure_monitor.exports.messages` | Number of log messages in completed export attempts. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/exporter.rs` |
-| `exporter.azure_monitor.exports.bytes` | Compressed request-body bytes in completed export attempts. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/exporter.rs` |
+| `exporter.attempted.messages` | Number of PData log messages represented by HTTP export attempts, partitioned by `signal` and `outcome`. Internal retries produce additional observations. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
+| `exporter.attempted.items` | Number of Azure Monitor rows represented by HTTP export attempts, partitioned by `signal` and `outcome`. Internal retries produce additional observations. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
+| `exporter.attempted.payload.size` | Gzip-compressed JSON request-body bytes submitted by HTTP export attempts, partitioned by `signal` and `outcome`. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
+| `exporter.attempted.duration` | HTTP export attempt latency in seconds, partitioned by `signal` and `outcome`. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
+| `exporter.azure_monitor.exports.batches` | Number of compressed batches reaching a terminal result after internal retries. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/exporter.rs` |
 | `exporter.azure_monitor.http.responses` | Number of HTTP export attempts by `response` (`http_2xx`, `http_400`, `http_401`, `http_403`, `http_404`, `http_413`, `http_429`, `http_5xx`, `network_error`, or `other`). | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
 | `exporter.azure_monitor.http.latency` | HTTP export attempt latency in milliseconds (min/max/sum/count), partitioned by `response`. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
 | `exporter.azure_monitor.batch_size` | Compressed batch size in bytes (min/max/sum/count). | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |

@@ -8,12 +8,14 @@ use std::rc::Rc;
 
 use otel_arrow_dfe_config::SignalType;
 use otel_arrow_dfe_engine::context::PipelineContext;
+use otel_arrow_dfe_otap::metrics::{
+    ExporterAttemptedItemsMetrics, ExporterAttemptedMetrics, ExporterAttemptedPayloadMetrics,
+};
 use otel_arrow_dfe_telemetry::common_attributes::{
-    HttpResponse, Outcome, OutcomeAttributes, SignalRegistrationAttributes,
+    HttpResponse, Outcome, OutcomeAttributes, SignalOutcomeAttributes,
 };
 pub use otel_arrow_dfe_telemetry::common_attributes::{
     HttpResponseAttributes, OutcomeAttributes as ExportOutcomeAttributes,
-    SignalRegistrationAttributes as ExportSignalAttributes,
 };
 use otel_arrow_dfe_telemetry::error::Error as TelemetryError;
 use otel_arrow_dfe_telemetry::instrument::{Counter, Gauge, Mmsc};
@@ -51,26 +53,16 @@ pub struct AzureMonitorExporterOperationalMetrics {
     pub log_entries_too_large: Counter<u64>,
 }
 
-/// Export completion metrics partitioned by outcome.
+/// Completed compressed batches partitioned by terminal outcome.
 #[metric_set(
     name = "exporter.azure_monitor.exports",
-    registration_attributes = SignalRegistrationAttributes,
     measurement_attributes = OutcomeAttributes
 )]
 #[derive(Debug, Default, Clone)]
 pub struct AzureMonitorExporterExportMetrics {
-    /// Number of items in completed export attempts.
-    #[metric(unit = "{item}")]
-    pub items: Counter<u64>,
     /// Number of completed export batches.
     #[metric(unit = "{batch}")]
     pub batches: Counter<u64>,
-    /// Number of messages in completed export attempts.
-    #[metric(unit = "{message}")]
-    pub messages: Counter<u64>,
-    /// Compressed request-body bytes in completed export attempts.
-    #[metric(unit = "By")]
-    pub bytes: Counter<u64>,
 }
 
 /// HTTP export attempts partitioned by response category.
@@ -128,6 +120,9 @@ pub struct AzureMonitorExporterHeartbeatMetrics {
 /// Full metrics tracker for the Azure Monitor exporter.
 pub struct AzureMonitorExporterMetricsTracker {
     operational_metrics: MetricSet<AzureMonitorExporterOperationalMetrics>,
+    attempted_metrics: MeasurementMetricSet<ExporterAttemptedMetrics>,
+    attempted_payload_metrics: MeasurementMetricSet<ExporterAttemptedPayloadMetrics>,
+    attempted_items_metrics: MeasurementMetricSet<ExporterAttemptedItemsMetrics>,
     export_metrics: MeasurementMetricSet<AzureMonitorExporterExportMetrics>,
     http_metrics: MeasurementMetricSet<AzureMonitorExporterHttpMetrics>,
     state_metrics: MeasurementMetricSet<AzureMonitorExporterStateMetrics>,
@@ -147,12 +142,10 @@ impl AzureMonitorExporterMetricsTracker {
     pub(super) fn register(pipeline_ctx: &PipelineContext) -> Self {
         Self {
             operational_metrics: AzureMonitorExporterOperationalMetrics::register(pipeline_ctx),
-            export_metrics: AzureMonitorExporterExportMetrics::register(
-                pipeline_ctx,
-                &SignalRegistrationAttributes {
-                    signal: SignalType::Logs,
-                },
-            ),
+            attempted_metrics: ExporterAttemptedMetrics::register(pipeline_ctx),
+            attempted_payload_metrics: ExporterAttemptedPayloadMetrics::register(pipeline_ctx),
+            attempted_items_metrics: ExporterAttemptedItemsMetrics::register(pipeline_ctx),
+            export_metrics: AzureMonitorExporterExportMetrics::register(pipeline_ctx),
             http_metrics: AzureMonitorExporterHttpMetrics::register(pipeline_ctx),
             state_metrics: AzureMonitorExporterStateMetrics::register(pipeline_ctx),
             heartbeat_metrics: AzureMonitorExporterHeartbeatMetrics::register(pipeline_ctx),
@@ -163,6 +156,9 @@ impl AzureMonitorExporterMetricsTracker {
     pub(super) fn report(&mut self, reporter: &mut MetricsReporter) -> Result<(), TelemetryError> {
         reporter
             .report(&mut self.operational_metrics)
+            .and_then(|()| reporter.report_measurement(&mut self.attempted_metrics))
+            .and_then(|()| reporter.report_measurement(&mut self.attempted_payload_metrics))
+            .and_then(|()| reporter.report_measurement(&mut self.attempted_items_metrics))
             .and_then(|()| reporter.report_measurement(&mut self.export_metrics))
             .and_then(|()| reporter.report_measurement(&mut self.http_metrics))
             .and_then(|()| reporter.report_measurement(&mut self.state_metrics))
@@ -175,6 +171,9 @@ impl AzureMonitorExporterMetricsTracker {
         &mut self,
     ) -> Vec<otel_arrow_dfe_telemetry::metrics::MetricSetSnapshot> {
         let mut snapshots = self.operational_metrics.terminal_snapshots();
+        snapshots.extend(self.attempted_metrics.terminal_snapshots());
+        snapshots.extend(self.attempted_payload_metrics.terminal_snapshots());
+        snapshots.extend(self.attempted_items_metrics.terminal_snapshots());
         snapshots.extend(self.export_metrics.terminal_snapshots());
         snapshots.extend(self.http_metrics.terminal_snapshots());
         snapshots.extend(self.state_metrics.terminal_snapshots());
@@ -190,6 +189,36 @@ impl AzureMonitorExporterMetricsTracker {
 
     #[inline]
     #[must_use]
+    pub(super) fn attempted_for(&self, outcome: Outcome) -> &ExporterAttemptedMetrics {
+        self.attempted_metrics.get(SignalOutcomeAttributes {
+            signal: SignalType::Logs,
+            outcome,
+        })
+    }
+
+    #[inline]
+    #[must_use]
+    pub(super) fn attempted_payload_for(
+        &self,
+        outcome: Outcome,
+    ) -> &ExporterAttemptedPayloadMetrics {
+        self.attempted_payload_metrics.get(SignalOutcomeAttributes {
+            signal: SignalType::Logs,
+            outcome,
+        })
+    }
+
+    #[inline]
+    #[must_use]
+    pub(super) fn attempted_items_for(&self, outcome: Outcome) -> &ExporterAttemptedItemsMetrics {
+        self.attempted_items_metrics.get(SignalOutcomeAttributes {
+            signal: SignalType::Logs,
+            outcome,
+        })
+    }
+
+    #[inline]
+    #[must_use]
     pub(super) fn http_for(&self, response: HttpResponse) -> &AzureMonitorExporterHttpMetrics {
         self.http_metrics.get(HttpResponseAttributes { response })
     }
@@ -201,18 +230,33 @@ impl AzureMonitorExporterMetricsTracker {
     }
 
     #[inline]
-    pub(super) fn record_export(
+    pub(super) fn record_attempt(
         &mut self,
         outcome: Outcome,
         items: u64,
         messages: u64,
-        bytes: u64,
+        payload_size: u64,
+        duration: std::time::Duration,
     ) {
-        let metrics = self.export_metrics.with(OutcomeAttributes { outcome });
-        metrics.items.add(items);
-        metrics.batches.inc();
-        metrics.messages.add(messages);
-        metrics.bytes.add(bytes);
+        let attributes = SignalOutcomeAttributes {
+            signal: SignalType::Logs,
+            outcome,
+        };
+        let attempted = self.attempted_metrics.with(attributes);
+        attempted.messages.add(messages);
+        attempted.duration.record(duration.as_secs_f64());
+        self.attempted_items_metrics.with(attributes).record(items);
+        self.attempted_payload_metrics
+            .with(attributes)
+            .record(payload_size);
+    }
+
+    #[inline]
+    pub(super) fn record_completed_batch(&mut self, outcome: Outcome) {
+        self.export_metrics
+            .with(OutcomeAttributes { outcome })
+            .batches
+            .inc();
     }
 
     #[inline]
@@ -280,25 +324,55 @@ mod tests {
         AzureMonitorExporterMetricsTracker::register(&pipeline_ctx)
     }
 
-    /// Scenario: Export attempts complete with successful and failed outcomes.
-    /// Guarantees: Each outcome records items, batches, and messages in its own metric bucket.
+    /// Scenario: HTTP export attempts complete with successful and failed outcomes.
+    /// Guarantees: Shared message, item, payload-size, and duration metrics are partitioned by outcome.
     #[test]
-    fn export_metrics_are_partitioned_by_outcome() {
+    fn attempted_metrics_are_partitioned_by_outcome() {
         let mut metrics = new_test_tracker();
-        metrics.record_export(Outcome::Success, 100, 50, 1_024);
-        metrics.record_export(Outcome::Failure, 10, 5, 512);
+        metrics.record_attempt(
+            Outcome::Success,
+            100,
+            50,
+            1_024,
+            std::time::Duration::from_millis(20),
+        );
+        metrics.record_attempt(
+            Outcome::Failure,
+            10,
+            5,
+            512,
+            std::time::Duration::from_millis(30),
+        );
 
-        let success = metrics.export_for(Outcome::Success);
-        assert_eq!(success.items.get(), 100);
-        assert_eq!(success.batches.get(), 1);
+        let success = metrics.attempted_for(Outcome::Success);
         assert_eq!(success.messages.get(), 50);
-        assert_eq!(success.bytes.get(), 1_024);
+        assert_eq!(success.duration.get().count(), 1);
+        assert_eq!(
+            metrics.attempted_items_for(Outcome::Success).items.get(),
+            100
+        );
+        assert_eq!(
+            metrics
+                .attempted_payload_for(Outcome::Success)
+                .payload_size
+                .get(),
+            1_024
+        );
 
-        let failure = metrics.export_for(Outcome::Failure);
-        assert_eq!(failure.items.get(), 10);
-        assert_eq!(failure.batches.get(), 1);
+        let failure = metrics.attempted_for(Outcome::Failure);
         assert_eq!(failure.messages.get(), 5);
-        assert_eq!(failure.bytes.get(), 512);
+        assert_eq!(failure.duration.get().count(), 1);
+        assert_eq!(
+            metrics.attempted_items_for(Outcome::Failure).items.get(),
+            10
+        );
+        assert_eq!(
+            metrics
+                .attempted_payload_for(Outcome::Failure)
+                .payload_size
+                .get(),
+            512
+        );
     }
 
     /// Scenario: HTTP attempts receive successful, throttled, and network-error responses.
@@ -404,13 +478,19 @@ mod tests {
     #[test]
     fn terminal_snapshots_include_touched_measurement_metrics() {
         let mut metrics = new_test_tracker();
-        metrics.record_export(Outcome::Success, 10, 1, 100);
+        metrics.record_attempt(
+            Outcome::Success,
+            10,
+            1,
+            100,
+            std::time::Duration::from_millis(10),
+        );
 
         let snapshots = metrics.terminal_snapshots();
         let export_snapshot = snapshots
             .iter()
-            .find(|snapshot| snapshot.descriptor().name == "exporter.azure_monitor.exports")
-            .expect("export metrics should be included in terminal snapshots");
+            .find(|snapshot| snapshot.descriptor().name == "exporter.attempted")
+            .expect("attempted metrics should be included in terminal snapshots");
         assert_eq!(
             export_snapshot.measurement_attribute_value("outcome"),
             Some("success")
@@ -420,7 +500,7 @@ mod tests {
         assert!(
             next_snapshots
                 .iter()
-                .all(|snapshot| snapshot.descriptor().name != "exporter.azure_monitor.exports")
+                .all(|snapshot| snapshot.descriptor().name != "exporter.attempted")
         );
     }
 
@@ -431,10 +511,16 @@ mod tests {
         let mut metrics = new_test_tracker();
         let (receiver, mut reporter) = MetricsReporter::create_new_and_receiver(16);
         metrics.add_batch_size(42.0);
-        metrics.record_export(Outcome::Success, 42, 1, 420);
+        metrics.record_attempt(
+            Outcome::Success,
+            42,
+            1,
+            420,
+            std::time::Duration::from_millis(10),
+        );
 
         metrics.report(&mut reporter).unwrap();
 
-        assert_eq!(receiver.try_iter().count(), 2);
+        assert_eq!(receiver.try_iter().count(), 4);
     }
 }
