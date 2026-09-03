@@ -9,7 +9,7 @@ by the crate and log events emitted via `otel_*` log macros.
 | Metric name | Description | Produced in file |
 | --- | --- | --- |
 | `exporter.attempted.messages` | Number of PData log messages represented by HTTP export attempts, partitioned by `signal` and `outcome`. Internal retries produce additional observations. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
-| `exporter.attempted.items` | Number of Azure Monitor rows represented by HTTP export attempts, partitioned by `signal` and `outcome`. Internal retries produce additional observations. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
+| `exporter.attempted.items` | Number of Azure Monitor rows represented by HTTP export attempts when item counts are enabled, partitioned by `signal` and `outcome`. Internal retries produce additional observations. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
 | `exporter.attempted.payload.size` | Gzip-compressed JSON request-body bytes submitted by HTTP export attempts, partitioned by `signal` and `outcome`. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
 | `exporter.azure_monitor.exports.batches` | Number of compressed batches reaching a terminal result after internal retries. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/exporter.rs` |
 | `exporter.azure_monitor.http.responses` | Number of HTTP export attempts by `response` (`http_2xx`, `http_400`, `http_401`, `http_403`, `http_404`, `http_413`, `http_429`, `http_5xx`, `network_error`, or `other`). | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/client.rs` |
@@ -21,6 +21,11 @@ by the crate and log events emitted via `otel_*` log macros.
 | `exporter.azure_monitor.state.mappings` | Current number of exporter state-map entries, partitioned by `mapping` (`batch_to_message`, `message_to_batch`, or `message_to_data`). | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/exporter.rs` |
 | `exporter.azure_monitor.log_entries_too_large` | Number of log entries rejected for exceeding batch size limit. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/exporter.rs` |
 | `exporter.azure_monitor.heartbeats.sends` | Number of completed heartbeat send attempts. | `crates/contrib-nodes/src/exporters/azure_monitor_exporter/exporter.rs` |
+
+Shared `exporter.attempted.duration` is intentionally deferred until the
+component-duration policy and API in #3983 are finalized. This exporter
+continues to report per-HTTP-attempt latency through
+`exporter.azure_monitor.http.latency`.
 
 ## Logs
 

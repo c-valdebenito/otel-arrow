@@ -9,7 +9,7 @@ use std::rc::Rc;
 use otel_arrow_dfe_config::SignalType;
 use otel_arrow_dfe_engine::context::PipelineContext;
 use otel_arrow_dfe_otap::metrics::{
-    ExporterAttemptedItemsMetrics, ExporterAttemptedMetrics, ExporterAttemptedPayloadMetrics,
+    ExporterAttemptedItemsMetrics, ExporterAttemptedPayloadMetrics,
 };
 use otel_arrow_dfe_telemetry::common_attributes::{
     HttpResponse, Outcome, OutcomeAttributes, SignalOutcomeAttributes,
@@ -51,6 +51,22 @@ pub struct AzureMonitorExporterOperationalMetrics {
     /// Number of log entries rejected for exceeding the batch size limit.
     #[metric(unit = "{entry}")]
     pub log_entries_too_large: Counter<u64>,
+}
+
+/// Always-on message accounting for concrete Azure Monitor HTTP attempts.
+///
+/// This local definition avoids registering the duration instrument currently
+/// bundled with the shared type. It can be replaced by the shared message-only
+/// type after the duration-policy API is finalized.
+#[metric_set(
+    name = "exporter.attempted",
+    measurement_attributes = SignalOutcomeAttributes
+)]
+#[derive(Debug, Default, Clone)]
+pub struct AzureMonitorExporterAttemptedMetrics {
+    /// Number of PData messages represented by HTTP export attempts.
+    #[metric(unit = "{message}")]
+    pub messages: Counter<u64>,
 }
 
 /// Completed compressed batches partitioned by terminal outcome.
@@ -120,9 +136,10 @@ pub struct AzureMonitorExporterHeartbeatMetrics {
 /// Full metrics tracker for the Azure Monitor exporter.
 pub struct AzureMonitorExporterMetricsTracker {
     operational_metrics: MetricSet<AzureMonitorExporterOperationalMetrics>,
-    attempted_metrics: MeasurementMetricSet<ExporterAttemptedMetrics>,
+    attempted_metrics: MeasurementMetricSet<AzureMonitorExporterAttemptedMetrics>,
     attempted_payload_metrics: MeasurementMetricSet<ExporterAttemptedPayloadMetrics>,
     attempted_items_metrics: MeasurementMetricSet<ExporterAttemptedItemsMetrics>,
+    attempted_items_enabled: bool,
     export_metrics: MeasurementMetricSet<AzureMonitorExporterExportMetrics>,
     http_metrics: MeasurementMetricSet<AzureMonitorExporterHttpMetrics>,
     state_metrics: MeasurementMetricSet<AzureMonitorExporterStateMetrics>,
@@ -142,9 +159,10 @@ impl AzureMonitorExporterMetricsTracker {
     pub(super) fn register(pipeline_ctx: &PipelineContext) -> Self {
         Self {
             operational_metrics: AzureMonitorExporterOperationalMetrics::register(pipeline_ctx),
-            attempted_metrics: ExporterAttemptedMetrics::register(pipeline_ctx),
+            attempted_metrics: AzureMonitorExporterAttemptedMetrics::register(pipeline_ctx),
             attempted_payload_metrics: ExporterAttemptedPayloadMetrics::register(pipeline_ctx),
             attempted_items_metrics: ExporterAttemptedItemsMetrics::register(pipeline_ctx),
+            attempted_items_enabled: false,
             export_metrics: AzureMonitorExporterExportMetrics::register(pipeline_ctx),
             http_metrics: AzureMonitorExporterHttpMetrics::register(pipeline_ctx),
             state_metrics: AzureMonitorExporterStateMetrics::register(pipeline_ctx),
@@ -189,7 +207,7 @@ impl AzureMonitorExporterMetricsTracker {
 
     #[inline]
     #[must_use]
-    pub(super) fn attempted_for(&self, outcome: Outcome) -> &ExporterAttemptedMetrics {
+    pub(super) fn attempted_for(&self, outcome: Outcome) -> &AzureMonitorExporterAttemptedMetrics {
         self.attempted_metrics.get(SignalOutcomeAttributes {
             signal: SignalType::Logs,
             outcome,
@@ -243,10 +261,17 @@ impl AzureMonitorExporterMetricsTracker {
         };
         let attempted = self.attempted_metrics.with(attributes);
         attempted.messages.add(messages);
-        self.attempted_items_metrics.with(attributes).record(items);
+        if self.attempted_items_enabled {
+            self.attempted_items_metrics.with(attributes).record(items);
+        }
         self.attempted_payload_metrics
             .with(attributes)
             .record(payload_size);
+    }
+
+    #[inline]
+    pub(super) fn set_attempted_items_enabled(&mut self, enabled: bool) {
+        self.attempted_items_enabled = enabled;
     }
 
     #[inline]
@@ -327,6 +352,7 @@ mod tests {
     #[test]
     fn attempted_metrics_are_partitioned_by_outcome() {
         let mut metrics = new_test_tracker();
+        metrics.set_attempted_items_enabled(true);
         metrics.record_attempt(Outcome::Success, 100, 50, 1_024);
         metrics.record_attempt(Outcome::Failure, 10, 5, 512);
 
@@ -356,6 +382,31 @@ mod tests {
                 .payload_size
                 .get(),
             512
+        );
+    }
+
+    /// Scenario: Attempt item accounting remains disabled until the node item-count policy opts in.
+    /// Guarantees: Messages and payload size remain always on while items follow the existing policy.
+    #[test]
+    fn attempted_items_follow_item_count_policy() {
+        let mut metrics = new_test_tracker();
+        metrics.record_attempt(Outcome::Success, 100, 2, 1_024);
+
+        assert_eq!(metrics.attempted_for(Outcome::Success).messages.get(), 2);
+        assert_eq!(
+            metrics
+                .attempted_payload_for(Outcome::Success)
+                .payload_size
+                .get(),
+            1_024
+        );
+        assert_eq!(metrics.attempted_items_for(Outcome::Success).items.get(), 0);
+
+        metrics.set_attempted_items_enabled(true);
+        metrics.record_attempt(Outcome::Success, 100, 2, 1_024);
+        assert_eq!(
+            metrics.attempted_items_for(Outcome::Success).items.get(),
+            100
         );
     }
 
@@ -473,6 +524,13 @@ mod tests {
             export_snapshot.measurement_attribute_value("outcome"),
             Some("success")
         );
+        assert!(
+            export_snapshot
+                .descriptor()
+                .metrics
+                .iter()
+                .all(|metric| metric.name != "duration")
+        );
 
         let next_snapshots = metrics.terminal_snapshots();
         assert!(
@@ -493,6 +551,6 @@ mod tests {
 
         metrics.report(&mut reporter).unwrap();
 
-        assert_eq!(receiver.try_iter().count(), 4);
+        assert_eq!(receiver.try_iter().count(), 3);
     }
 }

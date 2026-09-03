@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use otel_arrow_dfe_channel::error::RecvError;
 use otel_arrow_dfe_config::SignalType;
 use otel_arrow_dfe_engine::ConsumerEffectHandlerExtension;
+use otel_arrow_dfe_engine::Interests;
 use otel_arrow_dfe_engine::context::PipelineContext;
 use otel_arrow_dfe_engine::control::{AckMsg, NackMsg, NodeControlMsg};
 use otel_arrow_dfe_engine::error::Error as EngineError;
@@ -511,6 +512,12 @@ impl Exporter<OtapPdata> for AzureMonitorExporter {
         mut msg_chan: ExporterInbox<OtapPdata>,
         effect_handler: EffectHandler<OtapPdata>,
     ) -> Result<TerminalState, EngineError> {
+        self.metrics.borrow_mut().set_attempted_items_enabled(
+            effect_handler
+                .node_interests()
+                .contains(Interests::PRODUCED_CONSUMED_ITEM_COUNTS),
+        );
+
         otel_info!(
             "azure_monitor_exporter.start",
             endpoint = self.config.api.dcr_endpoint.as_str(),
